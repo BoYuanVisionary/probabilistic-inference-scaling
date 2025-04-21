@@ -125,6 +125,12 @@ logger.info(f"CUDA_DEVICE_MAX_CONNECTIONS: {os.environ.get('CUDA_DEVICE_MAX_CONN
     help="Path to the dataset.",
     show_default=True,
 )
+@click.option(
+    "--resampling-threshold",
+    default=0.95,
+    type=float,
+    help="Threshold for resampling.",
+)
 def main(
     dataset_start,
     dataset_end,
@@ -135,6 +141,7 @@ def main(
     softmax_temp,
     temperature_annealing,
     resample_inactive,
+    resampling_threshold,
     output_dir,
     model_path,
     prm_path,
@@ -158,6 +165,7 @@ def main(
     logger.info(f"Softmax temperature: {softmax_temp}")
     logger.info(f"Temperature annealing: {temperature_annealing}")
     logger.info(f"Resample inactive: {resample_inactive}")
+    logger.info(f"Resampling threshold: {resampling_threshold}")
     logger.info(f"Output directory: {output_dir}")
     logger.info(f"Enable prefix caching: {enable_prefix_caching}")
     logger.info(f"Model path: {model_path}")
@@ -212,9 +220,16 @@ def main(
 
     logger.info(f"Length of dataset: {len(dataset)}")
 
+    if config.use_continuous_batching and resampling_threshold is not None:
+        mapping_function = particle_gibbs_batch_adaptive
+    elif resampling_threshold is  None:
+        mapping_function = particle_gibbs_batch
+    else:
+        raise ValueError("Resampling threshold must be provided if use_continuous_batching is True")
+
     # Perform Particle Gibbs sampling on the dataset
     dataset = dataset.map(
-        particle_gibbs_batch_adaptive if config.use_continuous_batching else particle_gibbs,
+        mapping_function,
         batched=False,
         batch_size=1,
         fn_kwargs={
@@ -227,6 +242,7 @@ def main(
             "softmax_temp": softmax_temp,
             "temperature_annealing": temperature_annealing,
             "resample_inactive": resample_inactive,
+            "resampling_threshold": resampling_threshold,
         },
         desc="Running search",
         load_from_cache_file=False,

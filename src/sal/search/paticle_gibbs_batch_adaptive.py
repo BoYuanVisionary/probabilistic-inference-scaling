@@ -1,3 +1,10 @@
+# TODO: 
+# - At the step, perturb the particles with low rewards using the self-correction of LLMs
+# - Then accept the perturbed particles with a min(1, reward(new)/ reward(old))
+# - Design a adaptive particle filtering where the number of particles is selected based on the probability of the perturbed particles
+#   that greater than a given threshold.
+
+
 from vllm import LLM, SamplingParams
 import torch
 from sal.config import Config
@@ -13,6 +20,7 @@ from glob import glob
 from datasets import load_dataset
 from sal.utils.math import *
 from sal.utils.grader import *
+from sal.utils.resampling import *
 
 from sal.utils.qwen_math_parser import *
 from collections import defaultdict
@@ -128,79 +136,6 @@ def take_a_step_for_batch(question, llm, config, particles_steps_so_far=[[]], fi
     return particles_responses, particles_stops, particles_response_tokens_num
 
 
-class Particle:
-    def __init__(self, temperature=0.8):
-        """
-        Initializes a particle with a given temperature.
-        
-        Args:
-            temperature (float): The initial temperature of the particle.
-        """
-        self.trajectory = []  # Tracks the sequence of responses
-        self.rewards = []  # Tracks rewards for each step
-        self.tokens_num = [] # Tracks the number of tokens in each step
-        self.steps = 0  # Steps taken by the particle
-        self.active = True  # Indicates if the particle is still evolving
-        self.preferred = False  # Indicates if the particle is preferred
-        self.temperature = temperature  # Dynamic temperature of the particle
-
-    def add_step(self, response, reward, stop, tokens_num):
-        """Adds a step to the particle's trajectory."""
-        self.trajectory.append(response)
-        self.rewards.append(reward)
-        self.tokens_num.append(tokens_num)
-        self.steps += 1
-        if stop == "EOS" or """\\boxed""" in response:
-            self.active = False
-        if self.steps >= 40:
-            self.active = False
-
-    def get_last_reward(self):
-        """Returns the last recorded reward."""
-        return self.rewards[-1]
-
-    def is_active(self):
-        """Checks if the particle is active."""
-        return self.active
-
-    def get_trajectory(self):
-        """Returns the full trajectory as a single string."""
-        return "\n\n".join(self.trajectory)
-
-    def set_temperature(self, new_temperature):
-        """Sets a new temperature for the particle."""
-        self.temperature = new_temperature
-
-    def deepcopy(self, numSteps=None):
-        """Returns a deep copy of the particle."""
-        new_particle = Particle(temperature=self.temperature)
-
-        if numSteps is not None:
-            if numSteps >= len(
-                self.trajectory
-            ):  # capping it so it doesnt go out of bounds
-                numSteps = len(self.trajectory)
-
-        if numSteps is not None:
-            new_particle.trajectory = self.trajectory[:numSteps]
-            new_particle.rewards = self.rewards[:numSteps]
-            new_particle.tokens_num = self.tokens_num[:numSteps]
-            new_particle.steps = numSteps
-            if numSteps == len(self.trajectory):
-                new_particle.active = self.active
-            else:
-                new_particle.active = True
-        else:
-            new_particle.trajectory = self.trajectory.copy()
-            new_particle.rewards = self.rewards.copy()
-            new_particle.tokens_num = self.tokens_num.copy()
-            new_particle.steps = self.steps
-            new_particle.active = self.active
-
-        new_particle.preferred = self.preferred
-        return new_particle
-
-
 def temperature_linear_annealing(starting_temp, ending_temp, total_steps, current_step):
     """
     Computes the temperature at a given step using linear annealing.
@@ -230,7 +165,7 @@ def temperature_linear_annealing(starting_temp, ending_temp, total_steps, curren
     return starting_temp - (temp_range * step_fraction)
 
 
-def particle_gibbs_kernel(
+def particle_gibbs_kernel_adaptive(
     question,
     llm,
     prm,
@@ -238,6 +173,7 @@ def particle_gibbs_kernel(
     n_particles,
     softmax_temp,
     resample_inactive,
+    resampling_threshold,
     reference_particle=None,
     temperature_annealing=(),
     llm_sampling_temp=0.8,
@@ -250,8 +186,9 @@ def particle_gibbs_kernel(
         llm: Language model instance
         prm: Parameter object containing reward model
         config: Configuration for LLM
-        n_particles: Number of particles to maintain
+        n_particles: The maximal number of particles to maintain
         resample_inactive: Whether to resample inactive particles
+        adaptive_resampling_param: Parameters for adaptive resampling. Vanile multinomial resampling if None
     Returns:
         List of trajectories and their scores
     """
@@ -261,9 +198,12 @@ def particle_gibbs_kernel(
     logger.info(f"LLM sampling temperature: {llm_sampling_temp}")
     logger.info(f"Softmax temperature: {softmax_temp}")
     logger.info(f"Temperature annealing: {temperature_annealing}")
+    logger.info(f"Resampling threshold: {resampling_threshold}")
 
     stepwise_particle_tracker_before = []
     stepwise_particle_tracker_after = []
+
+    resampling = Resampling(config, resampling_threshold)
 
     # Initialize particles
     if reference_particle is None:
@@ -317,18 +257,18 @@ def particle_gibbs_kernel(
 
             # Sample new particles based on weights
             if reference_particle is None:
-                sampled_particles = np.random.choice(
+                sampled_particles = resampling.adaptive_resampling(
                     particles,
-                    size=len(particles),
-                    p=weights,
-                    replace=True,  # before particles was active_particles
+                    size=n_particles, # Size is the upper bound of the number of possible particles
+                    weights=weights,
+                    probs=rewards,
                 )
             else:
-                sampled_particles = np.random.choice(
+                sampled_particles = resampling.adaptive_resampling(
                     particles + [reference_particle],
-                    size=len(particles),
-                    p=weights,
-                    replace=True,  # before particles was active_particles
+                    size=n_particles, # Size is the upper bound of the number of possible particles
+                    weights=weights,
+                    probs=rewards,
                 )
 
             # TODO: change this to allow inactive particles to be sampled (bc perhaps the score of an incomplete still-evolving particle is higher than that of a completed particle)
@@ -344,6 +284,7 @@ def particle_gibbs_kernel(
             active_particles = [
                 particle for particle in particles if particle.is_active()
             ]
+
             # print(f"Active particles: {len(active_particles)} / {n_particles}")
 
             # Calculate rewards and weights
@@ -377,18 +318,18 @@ def particle_gibbs_kernel(
             if reference_particle is None:
                 print("len(particles)", len(particles))
                 print("len(weights)", len(weights))
-                sampled_particles = np.random.choice(
+                sampled_particles = resampling.adaptive_resampling(
                     active_particles,
-                    size=len(active_particles),
-                    p=weights,
-                    replace=True,  # before particles was active_particles
+                    size = n_particles-(len(particles)-len(active_particles)),
+                    weights=weights,
+                    probs=rewards,
                 )
             else:
-                sampled_particles = np.random.choice(
+                sampled_particles = resampling.adaptive_resampling(
                     active_particles + [reference_particle],
-                    size=len(active_particles),
-                    p=weights,
-                    replace=True,  # before particles was active_particles
+                    size= n_particles-(len(particles)-len(active_particles)),
+                    weights=weights,
+                    probs=rewards,
                 )
 
             # print(
@@ -431,6 +372,7 @@ def particle_gibbs_batch_adaptive(
     total_timesteps=1,
     n_particles=4,
     resample_inactive=True,
+    resampling_threshold=0.95,
     softmax_temp=1.0,
     temperature_annealing=(),
     llm_sampling_temp=0.8,
@@ -444,13 +386,14 @@ def particle_gibbs_batch_adaptive(
     logger.info(f"Processing question: {question_id}")
     particles_tracker = []
     current_timestep = 1
-    current_particles, tracker_before, tracker_after = particle_gibbs_kernel(
+    current_particles, tracker_before, tracker_after = particle_gibbs_kernel_adaptive(
                             x["problem"], 
                             llm, 
-                            prm, 
+                            prm,   
                             config, 
                             n_particles, 
                             resample_inactive=resample_inactive,
+                            resampling_threshold=resampling_threshold,
                             softmax_temp=softmax_temp,
                             temperature_annealing=temperature_annealing,
                             llm_sampling_temp=llm_sampling_temp,
@@ -489,7 +432,7 @@ def particle_gibbs_batch_adaptive(
 
             preferred_particle.preferred = True
 
-            current_particles, tracker_before, tracker_after = particle_gibbs_kernel(
+            current_particles, tracker_before, tracker_after = particle_gibbs_kernel_adaptive(
                 x["problem"],
                 llm,
                 prm,
@@ -497,6 +440,7 @@ def particle_gibbs_batch_adaptive(
                 n_particles,
                 softmax_temp,
                 resample_inactive=resample_inactive,
+                resampling_threshold=resampling_threshold,
                 reference_particle=preferred_particle,
                 temperature_annealing=temperature_annealing
             )
