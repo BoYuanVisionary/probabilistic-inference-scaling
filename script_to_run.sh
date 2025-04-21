@@ -1,4 +1,4 @@
-NUM_PARTICLES=(2 4 8 16)
+NUM_PARTICLES=(2)
 HF_TOKEN={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}
 
 

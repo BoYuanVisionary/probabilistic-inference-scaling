@@ -24,6 +24,7 @@ from sal.config import Config
 from sal.models.reward_models import load_prm
 from sal.search import particle_gibbs
 from sal.search.particle_gibbs_batch import particle_gibbs_batch
+from sal.search.paticle_gibbs_batch_adaptive import particle_gibbs_batch_adaptive
 from sal.utils.data import get_dataset, save_dataset
 
 logging.basicConfig(level=logging.INFO)
@@ -213,7 +214,7 @@ def main(
 
     # Perform Particle Gibbs sampling on the dataset
     dataset = dataset.map(
-        particle_gibbs_batch if config.use_continuous_batching else particle_gibbs,
+        particle_gibbs_batch_adaptive if config.use_continuous_batching else particle_gibbs,
         batched=False,
         batch_size=1,
         fn_kwargs={

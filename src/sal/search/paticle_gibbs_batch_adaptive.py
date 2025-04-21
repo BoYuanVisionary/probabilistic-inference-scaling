@@ -423,7 +423,7 @@ def particle_gibbs_kernel(
         return particles + [reference_particle], stepwise_particle_tracker_before, stepwise_particle_tracker_after
 
 import copy
-def particle_gibbs_batch(
+def particle_gibbs_batch_adaptive(
     x,
     config,
     llm,
