@@ -1,5 +1,4 @@
 NUM_PARTICLES=(2)
-HF_TOKEN={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}
 
 
 for P in ${NUM_PARTICLES[@]}; do
