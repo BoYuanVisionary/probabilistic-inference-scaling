@@ -1,9 +1,9 @@
-NUM_PARTICLES=(32 16 8 4 2 1 64 128)
-HF_TOKEN={Your HF Token}
+NUM_PARTICLES=(2 4 8 16)
+HF_TOKEN={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}
 
 
 for P in ${NUM_PARTICLES[@]}; do
-HF_TOKEN={HF_TOKEN}  python /new_data/probabilistic_inference_scaling/probabilistic_inference_scaling/scripts/pg.py \
+        python ./scripts/pg.py \
         --total-timesteps 1 \
         --n-particles $P \
         --dataset-start 0 \
@@ -11,9 +11,10 @@ HF_TOKEN={HF_TOKEN}  python /new_data/probabilistic_inference_scaling/probabilis
         --prm-path Qwen/Qwen2.5-Math-PRM-7B \
         --softmax-temp 1 \
         --seed 96 \
-        --model-path meta-llama/Llama-3.1-8B-Instruct \
-        --output-dir /new_data/probabilistic_inference_scaling/probabilistic_inference_scaling/llama8b_qwenRM_results_jan20/seed96/softmax_temp1/model_tempPoint8/p$P/ \
-	--resample-inactive
+        --model-path meta-llama/Llama-3.2-1B-Instruct \
+        --output-dir ./output/p$P/ \
+	--resample-inactive \
+        --dataset-path /ssdscratch/byuan48/particle_filtering/probabilistic-inference-scaling/datasets/math500.jsonl
 done
 
 #YOU ONLY HAVE TO CHANGE THE LOCATION OF PG.PY AND THE OUTPUT DIR.

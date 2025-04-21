@@ -144,7 +144,7 @@ def main(
     """
     start_time = time.time()  # Start timer
 
-    enable_prefix_caching = False
+    enable_prefix_caching = True
 
     # Log all the arguments
     logger.info("Starting execution with the following parameters:")

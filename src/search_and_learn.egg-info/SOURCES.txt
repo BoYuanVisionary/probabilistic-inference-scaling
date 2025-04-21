@@ -1,6 +1,4 @@
-LICENSE
 README.md
-pyproject.toml
 setup.py
 src/sal/__init__.py
 src/sal/config.py
