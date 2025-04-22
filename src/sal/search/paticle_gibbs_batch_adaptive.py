@@ -261,14 +261,12 @@ def particle_gibbs_kernel_adaptive(
                     particles,
                     size=n_particles, # Size is the upper bound of the number of possible particles
                     weights=weights,
-                    probs=rewards,
                 )
             else:
                 sampled_particles = resampling.multinomial_resampling(
                     particles + [reference_particle],
                     size=n_particles, # Size is the upper bound of the number of possible particles
                     weights=weights,
-                    probs=rewards,
                 )
 
             # TODO: change this to allow inactive particles to be sampled (bc perhaps the score of an incomplete still-evolving particle is higher than that of a completed particle)
@@ -322,14 +320,12 @@ def particle_gibbs_kernel_adaptive(
                     active_particles,
                     size = n_particles-(len(particles)-len(active_particles)),
                     weights=weights,
-                    probs=rewards,
                 )
             else:
                 sampled_particles = resampling.multinomial_resampling(
                     active_particles + [reference_particle],
                     size= n_particles-(len(particles)-len(active_particles)),
                     weights=weights,
-                    probs=rewards,
                 )
 
             # print(
@@ -350,26 +346,31 @@ def particle_gibbs_kernel_adaptive(
         responses, stops, tokens_num = take_a_step_for_batch(question, llm, config, first=False, particles_steps_so_far=[particle.trajectory for particle in particles], n_particles=len(particles))
         responses_to_pass_for_score = ["\n\n".join(particle.trajectory) + "\n\n" + response for response, particle in zip(responses, particles)]
         rewards = [prm.score([question], [[response]])[-1][-1][-1] for response in responses_to_pass_for_score]
+        problematic_particles = []
+        problematic_steps = []
+        right_particles = []
         for idx, particle in enumerate(particles):
             if not particle.is_active():
                 continue
-            particle.add_step(responses[idx], rewards[idx], stops[idx], tokens_num[idx])
-
-        # Self-correction to get better particles
-        problematic_particles = []
-        right_particles = []
-        for particle in particles:
-            if particle.get_last_reward() < 0.8:
+            if rewards[idx] < 0.5:
                 problematic_particles.append(particle)
+                problematic_steps.append(responses[idx])
             else:
+                particle.add_step(responses[idx], rewards[idx], stops[idx], tokens_num[idx])
                 right_particles.append(particle)
-        corrected_particles = resampling.self_refinement(llm, problematic_particles, question)
-        particles = right_particles + corrected_particles
+
+        corrected_steps, stops, tokens_num  = resampling.self_refinement(llm, problematic_particles, problematic_steps,question)
+        responses_to_pass_for_score = ["\n\n".join(problematic_particle.trajectory) + "\n\n" + corrected_step for corrected_step, problematic_particle in zip(corrected_steps, problematic_particles)]
+        rewards = [prm.score([question], [[response]])[-1][-1][-1] for response in responses_to_pass_for_score]
+
+        for idx, problematic_particle in enumerate(problematic_particles):
+            problematic_particle.add_step(corrected_steps[idx], rewards[idx], stops[idx], tokens_num[idx])
+        particles = right_particles + problematic_particles
 
         step = step + 1
         stepwise_particle_tracker_before.append([p.deepcopy() for p in particles])
 
-    if reference_particle is None:
+    if reference_particle is None: # Reference particle is not updated with self-refinement
         return particles, stepwise_particle_tracker_before, stepwise_particle_tracker_after 
     else:
         return particles + [reference_particle], stepwise_particle_tracker_before, stepwise_particle_tracker_after

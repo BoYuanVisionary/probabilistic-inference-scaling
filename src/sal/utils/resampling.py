@@ -9,61 +9,57 @@ import numpy as np
 from vllm import SamplingParams
 
 
-CRITIQUE_SINGLE_STEP_PROMPT = """You are an expert mathematician reviewing a specific step in a partially solved math problem.
+CRITIQUE_SINGLE_STEP_PROMPT_SYSTEM = """You are an expert mathematician reviewing a specific step in a partially solved math problem.
 
 **Your Task:**
 
-1.  **Context:** Review the 'Original Problem', the 'Previous Steps' (assume these are correct), and the specific 'Step {step_number_to_analyze} Under Review'.
-2.  **Analyze:** Determine *why* 'Step {step_number_to_analyze} Under Review' is incorrect based on the preceding steps and the original problem. If it happens to be correct, state that.
+1.  **Context:** Review the 'Original Problem', the 'Previous Steps' (assume these are correct), and the specific current step.
+2.  **Analyze:** Determine *why* the current step is incorrect based on the preceding steps and the original problem. If it happens to be correct, state that.
 3.  **Output:** Your entire output should be ONLY:
-    * A concise explanation of the error found in Step {step_number_to_analyze}.
-    * The correctly modified text for Step {step_number_to_analyze}. Do NOT include any other steps (previous or subsequent).
+    * A concise explanation of the error found in the current step.
+    * The correctly modified text for the current step. Do NOT include any other steps (previous or subsequent).
 
 **Example Output Structure:**
-Reasoning: [Explain the error in Step {step_number_to_analyze} here.]
+Reasoning: [Explain the error in the current step here.]
 
-Corrected Step {step_number_to_analyze}: [Provide the full text of the corrected Step {step_number_to_analyze} here.]
+## Corrected Step: [Provide the full text of the corrected step here.]
 
----
-**Original Problem:**
+**Your Task:** Provide the reasoning and the single corrected step text below.
+"""
+
+CRITIQUE_SINGLE_STEP_PROMPT_USER = """**Original Problem:**
 {question}
 ---
-**Previous Steps (Steps 1 to {step_number_to_analyze_minus_1}):**
+**Previous Steps:**
 {steps_before_suspicious_text}
 ---
-**Step {step_number_to_analyze} Under Review:**
-{suspicious_step_text}
----
-
-**Your Task:** Provide the reasoning and the single corrected step text below.
-"""
+**Current Step:**
+{suspicious_step_text}"""
 
 
-FIRSTCRITIQUE_SINGLE_STEP_PROMPT = """You are an expert mathematician reviewing a specific step in a partially solved math problem.
+FIRST_CRITIQUE_SINGLE_STEP_PROMPT_SYSTEM = """You are an expert mathematician reviewing a specific step in a partially solved math problem.
 
 **Your Task:**
 
-1.  **Context:** Review the 'Original Problem', and the specific 'Step {step_number_to_analyze} Under Review'.
-2.  **Analyze:** Determine *why* 'Step {step_number_to_analyze} Under Review' is incorrect based on the original problem. If it happens to be correct, state that.
+1.  **Context:** Review the 'Original Problem' and the specific current step.
+2.  **Analyze:** Determine *why* the current step is incorrect based on the original problem. If it happens to be correct, state that.
 3.  **Output:** Your entire output should be ONLY:
-    * A concise explanation of the error found in Step {step_number_to_analyze}.
-    * The correctly modified text for Step {step_number_to_analyze}. Do NOT include any other steps (previous or subsequent).
+    * A concise explanation of the error found in the current step.
+    * The correctly modified text for the current step. Do NOT include any other steps (previous or subsequent).
 
 **Example Output Structure:**
-Reasoning: [Explain the error in Step {step_number_to_analyze} here.]
+Reasoning: [Explain the error in the current step here.]
 
-Corrected Step {step_number_to_analyze}: [Provide the full text of the corrected Step {step_number_to_analyze} here.]
-
----
-**Original Problem:**
-{question}
----
-**Step {step_number_to_analyze} Under Review:**
-{suspicious_step_text}
----
+## Corrected Step: [Provide the full text of the corrected step here.]
 
 **Your Task:** Provide the reasoning and the single corrected step text below.
 """
+
+FIRST_CRITIQUE_SINGLE_STEP_PROMPT_USER = """**Original Problem:**
+{question}
+---
+**Current Step:**
+{suspicious_step_text}"""
 
 
 class Particle:
@@ -200,10 +196,12 @@ class Resampling:
         return selected_particles
     
     def self_refinement(
+        self,
         llm,
         particles: List[Particle],
+        problematic_steps: List[str],
         question: str,
-    ) -> List[Particle]:
+    ):
         """
         Batch-refines particles by sending all refinement prompts in one API call.
         Assumes the last step in each particle is the one needing refinement.
@@ -214,9 +212,11 @@ class Resampling:
             question: The original math problem statement.
 
         Returns:
-            A list of new Particle objects containing the refined solutions.
+            corrected_steps, stops, tokens_num
         """
-        refined_particles: List[Particle] = []
+        corrected_steps = []
+        stops = []
+        tokens_num = []
 
         # Sampling parameters for the LLM call (common to all requests)
         sampling_params = SamplingParams(
@@ -229,30 +229,30 @@ class Resampling:
 
         # Build batch of prompts
         batch_prompts = []
-        for particle in particles:
+        for particle_idx, particle in enumerate(particles):
             if not particle.trajectory:
                 raise ValueError("Particle trajectory is empty")
 
 
             n = len(particle.trajectory)
-            if n == 1:
-                prompt = FIRSTCRITIQUE_SINGLE_STEP_PROMPT.format(
+            if n == 0:
+                user_prompt = FIRST_CRITIQUE_SINGLE_STEP_PROMPT_USER.format(
                     question=question,
-                    step_number_to_analyze=1,
-                    suspicious_step_text=particle.trajectory[0]
+                    suspicious_step_text = problematic_steps[particle_idx]
                 )
+                system_prompt = FIRST_CRITIQUE_SINGLE_STEP_PROMPT_SYSTEM
+                
             else:
-                idx = n - 1
-                before = particle.trajectory[:idx]
+                
+                before = particle.trajectory[:n]
                 before_text = "\n\n".join(before)
-                prompt = CRITIQUE_SINGLE_STEP_PROMPT.format(
+                user_prompt = CRITIQUE_SINGLE_STEP_PROMPT_USER.format(
                     question=question,
-                    step_number_to_analyze_minus_1=idx,
-                    step_number_to_analyze=n,
                     steps_before_suspicious_text=before_text,
-                    suspicious_step_text=particle.trajectory[idx]
+                    suspicious_step_text=problematic_steps[particle_idx]
                 )
-            messages = [{"role": "system", "content": prompt}]
+                system_prompt = CRITIQUE_SINGLE_STEP_PROMPT_SYSTEM
+            messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
             batch_prompts.append(
                 tokenizer.apply_chat_template(
                     messages,
@@ -262,23 +262,32 @@ class Resampling:
             )
 
         # Batch generate
-        try:
-            batch_outputs = llm.generate(batch_prompts, sampling_params)
-        except Exception as e:
-            # On failure, return originals
-            print(f"Batch generation error: {e}")
-            return [p.deepcopy() for p in particles]
+        batch_outputs = llm.generate(batch_prompts, sampling_params)
+        corrected_steps = []
+        # TODO: add the stop and tokens_num
+        stops = [' '] * len(particles)
+        tokens_num = [0] * len(particles)
         
         # Map each output back to its particle
-        refined_particles: List[Particle] = []
-        for particle, output in zip(particles, batch_outputs):
+        for particle_idx, (particle, output) in enumerate(zip(particles, batch_outputs)):
             text = output.outputs[0].text.strip()
             if not text:
-                refined_particles.append(particle.deepcopy())
+                raise ValueError("No text output from the LLM")
             else:
-                new_particle = particle.deepcopy(len(particle.trajectory)-1)
-                new_particle.trajectory.append(text.split("\n\n")[1])
-                refined_particles.append(new_particle)
-        return refined_particles
+                
+                possbile_refined_step = text.split("\n\n")[-1]
+                print('-'*100)
+                print(f"prompt: {batch_prompts[particle_idx]}")
+                print('-'*100)
+                print(f"raw text output: {text}")
+                print('-'*100)
+          
+                if possbile_refined_step.startswith("## Corrected Step:"):
+                    corrected_steps.append(possbile_refined_step)
+                    print(f'original step: {problematic_steps[particle_idx]}')
+                    print(f"Refined step: {possbile_refined_step}")
+                else: # Do not update the particle if the LLM does not provide a corrected step
+                    corrected_steps.append(problematic_steps[particle_idx])
+        return corrected_steps, stops, tokens_num
 
 

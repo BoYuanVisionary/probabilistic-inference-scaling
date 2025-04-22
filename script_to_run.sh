@@ -15,7 +15,7 @@ for P in ${NUM_PARTICLES[@]}; do
                 --prm-path Qwen/Qwen2.5-Math-PRM-7B \
                 --softmax-temp 1 \
                 --seed $SEED \
-                --model-path meta-llama/Llama-3.2-1B-Instruct \
+                --model-path meta-llama/Llama-3.2-3B-Instruct \
                 --output-dir ${OUTPUT_DIR} \
                 --resample-inactive \
                 --dataset-path /ssdscratch/byuan48/particle_filtering/probabilistic-inference-scaling/datasets/math500.jsonl
