@@ -424,8 +424,6 @@ def particle_gibbs_kernel(
 
             # Sample new particles based on weights
             if reference_particle is None:
-                print("len(particles)", len(particles))
-                print("len(weights)", len(weights))
                 sampled_particles = np.random.choice(
                     active_particles,
                     size=len(active_particles),

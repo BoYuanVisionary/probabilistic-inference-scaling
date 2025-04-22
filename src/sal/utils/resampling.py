@@ -6,7 +6,64 @@
 from sal.config import Config
 from typing import List
 import numpy as np
+from vllm import SamplingParams
 
+
+CRITIQUE_SINGLE_STEP_PROMPT = """You are an expert mathematician reviewing a specific step in a partially solved math problem.
+
+**Your Task:**
+
+1.  **Context:** Review the 'Original Problem', the 'Previous Steps' (assume these are correct), and the specific 'Step {step_number_to_analyze} Under Review'.
+2.  **Analyze:** Determine *why* 'Step {step_number_to_analyze} Under Review' is incorrect based on the preceding steps and the original problem. If it happens to be correct, state that.
+3.  **Output:** Your entire output should be ONLY:
+    * A concise explanation of the error found in Step {step_number_to_analyze}.
+    * The correctly modified text for Step {step_number_to_analyze}. Do NOT include any other steps (previous or subsequent).
+
+**Example Output Structure:**
+Reasoning: [Explain the error in Step {step_number_to_analyze} here.]
+
+Corrected Step {step_number_to_analyze}: [Provide the full text of the corrected Step {step_number_to_analyze} here.]
+
+---
+**Original Problem:**
+{question}
+---
+**Previous Steps (Steps 1 to {step_number_to_analyze_minus_1}):**
+{steps_before_suspicious_text}
+---
+**Step {step_number_to_analyze} Under Review:**
+{suspicious_step_text}
+---
+
+**Your Task:** Provide the reasoning and the single corrected step text below.
+"""
+
+
+FIRSTCRITIQUE_SINGLE_STEP_PROMPT = """You are an expert mathematician reviewing a specific step in a partially solved math problem.
+
+**Your Task:**
+
+1.  **Context:** Review the 'Original Problem', and the specific 'Step {step_number_to_analyze} Under Review'.
+2.  **Analyze:** Determine *why* 'Step {step_number_to_analyze} Under Review' is incorrect based on the original problem. If it happens to be correct, state that.
+3.  **Output:** Your entire output should be ONLY:
+    * A concise explanation of the error found in Step {step_number_to_analyze}.
+    * The correctly modified text for Step {step_number_to_analyze}. Do NOT include any other steps (previous or subsequent).
+
+**Example Output Structure:**
+Reasoning: [Explain the error in Step {step_number_to_analyze} here.]
+
+Corrected Step {step_number_to_analyze}: [Provide the full text of the corrected Step {step_number_to_analyze} here.]
+
+---
+**Original Problem:**
+{question}
+---
+**Step {step_number_to_analyze} Under Review:**
+{suspicious_step_text}
+---
+
+**Your Task:** Provide the reasoning and the single corrected step text below.
+"""
 
 
 class Particle:
@@ -87,6 +144,14 @@ class Resampling:
     def __init__(self, config: Config, resampling_threshold: float):
         self.config = config
         self.resampling_threshold = resampling_threshold
+        self.system_prompt_MCMC = """"
+        
+        Perform a self-evaluation: You may include reasoning to verify correctness. 
+        please identify the mistake in your previous reasoning, revise your reasoning path.
+
+        Here is your previous reasoning:
+        {previous_reasoning}
+        """
 
     def multinomial_resampling(self, particles: List[Particle], size: int, weights: List[float]):
         """
@@ -117,7 +182,7 @@ class Resampling:
         # 2. verify if the particle is preferred
         def verify_particle(probs):
             prob = 1-np.prod(1-np.array(probs))
-            if prob > threshold and len(probs) >= size / 2: # This is to avoid the extreme case
+            if prob > threshold and len(probs) >= size / 4: # This is to avoid the extreme case
                 return True
             else:
                 return False
@@ -133,9 +198,87 @@ class Resampling:
                 return selected_particles
         print(f"the number of selected particles is {len(selected_particles)} out of {size}")
         return selected_particles
-            
+    
+    def self_refinement(
+        llm,
+        particles: List[Particle],
+        question: str,
+    ) -> List[Particle]:
+        """
+        Batch-refines particles by sending all refinement prompts in one API call.
+        Assumes the last step in each particle is the one needing refinement.
+
+        Args:
+            llm: The language model instance (must support batch 'generate').
+            particles: A list of Particle objects with a 'trajectory' attribute.
+            question: The original math problem statement.
+
+        Returns:
+            A list of new Particle objects containing the refined solutions.
+        """
+        refined_particles: List[Particle] = []
+
+        # Sampling parameters for the LLM call (common to all requests)
+        sampling_params = SamplingParams(
+            temperature=0.8,
+            max_tokens=2048,
+            stop=["<|eot_id|>"]
+        )
+
+        tokenizer = llm.get_tokenizer()
+
+        # Build batch of prompts
+        batch_prompts = []
+        for particle in particles:
+            if not particle.trajectory:
+                raise ValueError("Particle trajectory is empty")
 
 
+            n = len(particle.trajectory)
+            if n == 1:
+                prompt = FIRSTCRITIQUE_SINGLE_STEP_PROMPT.format(
+                    question=question,
+                    step_number_to_analyze=1,
+                    suspicious_step_text=particle.trajectory[0]
+                )
+            else:
+                idx = n - 1
+                before = particle.trajectory[:idx]
+                before_text = "\n\n".join(before)
+                prompt = CRITIQUE_SINGLE_STEP_PROMPT.format(
+                    question=question,
+                    step_number_to_analyze_minus_1=idx,
+                    step_number_to_analyze=n,
+                    steps_before_suspicious_text=before_text,
+                    suspicious_step_text=particle.trajectory[idx]
+                )
+            messages = [{"role": "system", "content": prompt}]
+            batch_prompts.append(
+                tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+            )
+
+        # Batch generate
+        try:
+            batch_outputs = llm.generate(batch_prompts, sampling_params)
+        except Exception as e:
+            # On failure, return originals
+            print(f"Batch generation error: {e}")
+            return [p.deepcopy() for p in particles]
         
+        # Map each output back to its particle
+        refined_particles: List[Particle] = []
+        for particle, output in zip(particles, batch_outputs):
+            text = output.outputs[0].text.strip()
+            if not text:
+                refined_particles.append(particle.deepcopy())
+            else:
+                new_particle = particle.deepcopy(len(particle.trajectory)-1)
+                new_particle.trajectory.append(text.split("\n\n")[1])
+                refined_particles.append(new_particle)
+        return refined_particles
 
 

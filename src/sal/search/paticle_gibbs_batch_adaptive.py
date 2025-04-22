@@ -257,14 +257,14 @@ def particle_gibbs_kernel_adaptive(
 
             # Sample new particles based on weights
             if reference_particle is None:
-                sampled_particles = resampling.adaptive_resampling(
+                sampled_particles = resampling.multinomial_resampling(
                     particles,
                     size=n_particles, # Size is the upper bound of the number of possible particles
                     weights=weights,
                     probs=rewards,
                 )
             else:
-                sampled_particles = resampling.adaptive_resampling(
+                sampled_particles = resampling.multinomial_resampling(
                     particles + [reference_particle],
                     size=n_particles, # Size is the upper bound of the number of possible particles
                     weights=weights,
@@ -318,14 +318,14 @@ def particle_gibbs_kernel_adaptive(
             if reference_particle is None:
                 print("len(particles)", len(particles))
                 print("len(weights)", len(weights))
-                sampled_particles = resampling.adaptive_resampling(
+                sampled_particles = resampling.multinomial_resampling(
                     active_particles,
                     size = n_particles-(len(particles)-len(active_particles)),
                     weights=weights,
                     probs=rewards,
                 )
             else:
-                sampled_particles = resampling.adaptive_resampling(
+                sampled_particles = resampling.multinomial_resampling(
                     active_particles + [reference_particle],
                     size= n_particles-(len(particles)-len(active_particles)),
                     weights=weights,
@@ -354,6 +354,17 @@ def particle_gibbs_kernel_adaptive(
             if not particle.is_active():
                 continue
             particle.add_step(responses[idx], rewards[idx], stops[idx], tokens_num[idx])
+
+        # Self-correction to get better particles
+        problematic_particles = []
+        right_particles = []
+        for particle in particles:
+            if particle.get_last_reward() < 0.8:
+                problematic_particles.append(particle)
+            else:
+                right_particles.append(particle)
+        corrected_particles = resampling.self_refinement(llm, problematic_particles, question)
+        particles = right_particles + corrected_particles
 
         step = step + 1
         stepwise_particle_tracker_before.append([p.deepcopy() for p in particles])
